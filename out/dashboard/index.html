@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Radar — pre-token protocols ranked by implied value</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="top-in">
+    <div class="brand">
+      <span class="pulse" aria-hidden="true"></span>
+      <div>
+        <h1>TOKEN RADAR</h1>
+        <p class="sub">Every protocol that records no token, ranked by what its launch would be worth.</p>
+      </div>
+    </div>
+    <div class="chips" id="chips"></div>
+  </div>
+</header>
+<main>
+  <section class="method" aria-label="How the values are earned">
+    <h2>How a value is earned</h2>
+    <p>Each pre-token protocol is priced like the launched protocols in its own category: their
+    market-cap&thinsp;/&thinsp;TVL ratios, shrunk toward the global launched median where a category has few
+    comparables. That multiple is then adjusted for the protocol's 7-day TVL growth and for how long it
+    has run with no token. Nothing is priced from its name, and a protocol is only ever said to
+    <em>record no token</em> — never that it has none.</p>
+    <p class="method-meta" id="methodMeta"></p>
+  </section>
+
+  <nav class="tabs" aria-label="Views">
+    <button id="tabBoard" class="tab on" type="button">Board</button>
+    <button id="tabLive" class="tab" type="button">Already launched</button>
+  </nav>
+
+  <section id="boardView">
+    <div class="controls" role="search">
+      <input id="q" type="search" placeholder="Search a protocol…" aria-label="Search protocols" autocomplete="off">
+      <select id="cat" aria-label="Filter by category"></select>
+      <select id="chain" aria-label="Filter by chain"></select>
+      <label class="wl"><input id="wl" type="checkbox"> Watchlist only</label>
+      <select id="sort" aria-label="Sort the board">
+        <option value="rank">Sort: rank</option>
+        <option value="tvl">Sort: TVL</option>
+        <option value="chg">Sort: 7-day change</option>
+        <option value="age">Sort: age</option>
+      </select>
+    </div>
+    <p class="count" id="count"></p>
+    <div id="detail"></div>
+    <div class="table-wrap">
+      <table id="board">
+        <thead><tr>
+          <th class="num">#</th><th>Protocol</th><th>Category</th><th>Chains</th>
+          <th class="num">TVL</th><th class="num">7d</th><th class="num">Age</th>
+          <th class="num">Implied value</th><th class="num">Multiple</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <p class="empty" id="empty" hidden>No protocol matches this filter.</p>
+  </section>
+
+  <section id="liveView" hidden>
+    <p class="live-note">These protocols already have a token that trades, so the board shows the market's
+    own value for them — never a model number. They are here so the radar's line between
+    <em>launched</em> and <em>still to come</em> is visible.</p>
+    <div class="table-wrap">
+      <table id="live">
+        <thead><tr>
+          <th>Protocol</th><th>Category</th><th>Chains</th>
+          <th class="num">TVL</th><th class="num">Market cap</th><th class="num">Mcap / TVL</th><th class="num">7d</th>
+        </tr></thead>
+        <tbody id="liveRows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <p>Snapshot: every protocol at or above $5,000,000 TVL, as of <span id="asOf"></span>.
+    Watchlist floor $50,000,000. Source: <span id="src"></span>.</p>
+    <p>Implied values are this entry's own claim, computed from the snapshot alone. They do not
+    predict whether or when a token is issued.</p>
+  </footer>
+</main>
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
