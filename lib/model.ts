@@ -6,7 +6,7 @@
 // Implied value is earned from the snapshot's own figures, never from a name list:
 // for each pre-token protocol the model fits a size curve to the launched protocols —
 // log market cap against log TVL, one intercept per category and one shared slope,
-// least squares over the launched comparables — and prices the protocol on that curve:
+// fitted at run time from the snapshot — and prices the protocol on that curve:
 //
 //   log mcap = intercept[category] + slope * log TVL        (fitted, not assumed)
 //   multiple = exp(intercept + (slope - 1) * log TVL), clamped [0.02, 1.5]
@@ -14,14 +14,19 @@
 //
 // A flat category median assumes big protocols trade at the same mcap/TVL as small
 // ones; the snapshot says otherwise (corr(log ratio, log TVL) = -0.44), and the fitted
-// slope (about 0.55, well under 1) captures it: larger protocols earn a lower multiple.
-// Category intercepts are shrunk toward their mean where a category has few launched
-// protocols, exactly as the v1 median was shrunk toward the global median. Growth
-// (7-day TVL change) and maturity (age with no token) adjust the curve value exactly
-// as v1 did. The curve is validated, at run time, by a leave-one-out backtest on the
-// launched protocols: each one is held out, the curve is refit without it, and its
-// market cap is predicted — the same test is run for the v1 category-median model,
-// and the dashboard reports both scores.
+// slope (about 0.67, well under 1) captures it: larger protocols earn a lower multiple.
+// The fit is robust, because launched mcap/TVL ratios span 0.001x to 3.18x: the slope
+// comes from a pooled within-category regression whose residuals are Huber-downweighted,
+// so a few extreme ratios cannot bend it, and each category's intercept is the MEDIAN
+// of its protocols' log mcap minus slope times log TVL — not a mean — shrunk toward the
+// global median intercept where a category has few launched protocols. Growth (7-day
+// TVL change) and maturity (age with no token) adjust the curve value exactly as v1
+// did. The curve is validated, at run time, by a leave-one-out backtest on the launched
+// protocols: each one is held out, the curve is refit without it, and its market cap is
+// predicted — the same test is run for the v1 category-median model, and the dashboard
+// reports both scores. The dashboard also draws the fit: every launched protocol as a
+// point of log TVL against log mcap/TVL, with the fitted line through them, so a reader
+// can see the size effect instead of taking it on trust.
 //
 // A protocol records no token (all three of mcap_usd, gecko_id, symbol null); the board
 // says so and never claims it has none. Wrapped, staked and bridged products of tokens
@@ -82,16 +87,21 @@ export const MODEL = {
   maturityRange: 0.4,
   maturityDays: 1095,
   unknownAgeDays: 365,
-  shrinkWeight: 6,
+  shrinkWeight: 12,
+  /** The v1 category-median baseline's shrink weight, kept at its shipped 6 so the
+   * backtest compares the new curve against v1 exactly as v1 ran. */
+  v1ShrinkWeight: 6,
   minCategoryComps: 3,
   multipleFloor: 0.02,
   multipleCap: 1.5,
   minCompTvl: 5_000_000,
   ratioFloor: 0.001,
   ratioCap: 5,
+  huberK: 1.345,
+  huberIters: 8,
 } as const;
 
-export const MODEL_VERSION = 'radar-3-curve';
+export const MODEL_VERSION = 'radar-4-median-curve';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries. */
 export const EARLY_ROWS = 160;
@@ -160,14 +170,15 @@ export interface RadarData {
     early_size: number;
     live_size: number;
     curve_slope: number;
+    curve_global_intercept: number;
     backtest: {
       loo_n: number;
       v1_msle: number;
-      v2_msle: number;
+      curve_msle: number;
       v1_mae_log: number;
-      v2_mae_log: number;
+      curve_mae_log: number;
       v1_within2x: number;
-      v2_within2x: number;
+      curve_within2x: number;
     };
   };
   cats: string[];
@@ -175,6 +186,8 @@ export interface RadarData {
   comps: Record<string, [number | null, number, [string, number][]]>;
   rows: RadarRow[];
   live: LiveRow[];
+  /** The fitted curve, drawn: one [log TVL, log mcap/TVL] point per launched comparable. */
+  curvePts: [number, number][];
 }
 
 export class SnapshotError extends Error {
@@ -278,7 +291,7 @@ export function compMultiple(category: string | null, table: CompTable): { multi
   const key = category ?? '(no category)';
   const entry = table.byCategory.get(key);
   if (entry !== undefined && entry.n >= MODEL.minCategoryComps && entry.median !== null) {
-    const multiple = clamp((entry.n * entry.median + MODEL.shrinkWeight * table.globalMedian) / (entry.n + MODEL.shrinkWeight), MODEL.multipleFloor, MODEL.multipleCap);
+    const multiple = clamp((entry.n * entry.median + MODEL.v1ShrinkWeight * table.globalMedian) / (entry.n + MODEL.v1ShrinkWeight), MODEL.multipleFloor, MODEL.multipleCap);
     return { multiple, median: entry.median, count: entry.n };
   }
   return { multiple: clamp(table.globalMedian, MODEL.multipleFloor, MODEL.multipleCap), median: null, count: entry?.n ?? 0 };
@@ -293,72 +306,75 @@ export interface CurveFit {
   n: number;
 }
 
-/** Solve A x = b by Gaussian elimination with partial pivoting. A is small and dense. */
-function solveLinear(Ain: number[][], bin: number[]): number[] {
-  const n = bin.length;
-  const A = Ain.map((row) => [...row]);
-  const b = [...bin];
-  for (let col = 0; col < n; col++) {
-    let piv = col;
-    for (let r = col + 1; r < n; r++) if (Math.abs(A[r]![col]!) > Math.abs(A[piv]![col]!)) piv = r;
-    if (Math.abs(A[piv]![col]!) < 1e-12) throw new SnapshotError('size curve is singular: launched comparables do not identify it');
-    if (piv !== col) {
-      [A[col], A[piv]] = [A[piv]!, A[col]!];
-      [b[col], b[piv]] = [b[piv]!, b[col]!];
-    }
-    for (let r = col + 1; r < n; r++) {
-      const f = A[r]![col]! / A[col]![col]!;
-      for (let c = col; c < n; c++) A[r]![c]! -= f * A[col]![c]!;
-      b[r]! -= f * b[col]!;
-    }
-  }
-  const x = new Array<number>(n).fill(0);
-  for (let r = n - 1; r >= 0; r--) {
-    let s = b[r]!;
-    for (let c = r + 1; c < n; c++) s -= A[r]![c]! * x[c]!;
-    x[r] = s / A[r]![r]!;
-  }
-  return x;
-}
-
 /**
- * Fit log mcap = intercept[category] + slope * log TVL by least squares over the
- * launched comparables. Categories are sorted, so the fit is deterministic; a
- * category's intercept is shrunk toward the mean intercept with the same weight (6)
- * v1 used to shrink a category median toward the global median.
+ * Fit log mcap = intercept[category] + slope * log TVL over the launched
+ * comparables, robustly. Launched mcap/TVL ratios span 0.001x to 3.18x, so a plain
+ * least-squares fit is bent by its extremes; this fit is not:
+ *
+ * - the slope comes from a pooled within-category regression (each category's log
+ *   TVL and log mcap demeaned first, so level differences between categories cannot
+ *   load onto the slope), reweighted by Huber weights over 8 passes;
+ * - each category's intercept is the MEDIAN of its protocols' log mcap minus slope
+ *   times log TVL, shrunk toward the global median intercept with weight 12 where a
+ *   category has few launched protocols.
+ *
+ * Categories are sorted, the Huber passes are a fixed count, and every tie is broken
+ * by order, so the fit is deterministic.
  */
 export function fitSizeCurve(comps: Comp[]): CurveFit {
   const cats = [...new Set(comps.map((c) => c.category ?? '(no category)'))].sort();
-  const k = cats.length;
-  const idx = new Map(cats.map((c, i) => [c, i]));
-  // Normal equations for [dummies..., slope]: A = X'X, b = X'y.
-  const A: number[][] = Array.from({ length: k + 1 }, () => new Array<number>(k + 1).fill(0));
-  const b: number[] = new Array<number>(k + 1).fill(0);
+  const byCat = new Map<string, Comp[]>();
   for (const c of comps) {
-    const row = new Array<number>(k + 1).fill(0);
-    row[idx.get(c.category ?? '(no category)')!] = 1;
-    row[k] = Math.log(c.tvl_usd);
-    const y = Math.log(c.mcap_usd);
-    for (let i = 0; i <= k; i++) {
-      b[i]! += row[i]! * y;
-      for (let j = 0; j <= k; j++) A[i]![j]! += row[i]! * row[j]!;
+    const key = c.category ?? '(no category)';
+    const list = byCat.get(key) ?? [];
+    list.push(c);
+    byCat.set(key, list);
+  }
+  // Pooled within-category demeaned regression for the slope, Huber-IRLS.
+  const xd: number[] = [];
+  const yd: number[] = [];
+  for (const cat of cats) {
+    const list = byCat.get(cat)!;
+    if (list.length < 2) continue;
+    const mx = list.reduce((s, c) => s + Math.log(c.tvl_usd), 0) / list.length;
+    const my = list.reduce((s, c) => s + Math.log(c.mcap_usd), 0) / list.length;
+    for (const c of list) {
+      xd.push(Math.log(c.tvl_usd) - mx);
+      yd.push(Math.log(c.mcap_usd) - my);
     }
   }
-  const beta = solveLinear(A, b);
-  const slope = beta[k]!;
-  const raw = new Map(cats.map((c, i) => [c, beta[i]!]));
-  const meanIntercept = cats.reduce((s, c) => s + raw.get(c)!, 0) / cats.length;
+  let slope = 0.55;
+  const denom0 = xd.reduce((s, v) => s + v * v, 0);
+  if (denom0 > 0) {
+    slope = xd.reduce((s, v, i) => s + v * yd[i]!, 0) / denom0;
+    const weights = new Array<number>(xd.length).fill(1);
+    for (let iter = 0; iter < MODEL.huberIters; iter++) {
+      const resid = xd.map((v, i) => yd[i]! - slope * v);
+      const med = median(resid) ?? 0;
+      const mad = median(resid.map((r) => Math.abs(r - med))) ?? 0;
+      const scale = MODEL.huberK * mad * 1.4826 + 1e-9;
+      for (let i = 0; i < xd.length; i++) weights[i] = Math.min(1, scale / Math.max(Math.abs(resid[i]!), 1e-9));
+      const num = xd.reduce((s, v, i) => s + weights[i]! * v * yd[i]!, 0);
+      const den = xd.reduce((s, v, i) => s + weights[i]! * v * v, 0);
+      if (den > 0) slope = num / den;
+    }
+  }
+  // Median intercepts, shrunk toward the global median intercept.
+  const residuals = comps.map((c) => Math.log(c.mcap_usd) - slope * Math.log(c.tvl_usd));
+  const globalIntercept = median(residuals) ?? 0;
   const counts = new Map<string, number>();
   for (const c of comps) {
     const key = c.category ?? '(no category)';
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   const intercepts = new Map<string, number>();
-  for (const c of cats) {
-    const n = counts.get(c) ?? 0;
-    intercepts.set(c, (n * raw.get(c)! + MODEL.shrinkWeight * meanIntercept) / (n + MODEL.shrinkWeight));
+  for (const cat of cats) {
+    const list = byCat.get(cat)!;
+    const catMed = median(list.map((c) => Math.log(c.mcap_usd) - slope * Math.log(c.tvl_usd))) ?? globalIntercept;
+    const n = list.length;
+    intercepts.set(cat, (n * catMed + MODEL.shrinkWeight * globalIntercept) / (n + MODEL.shrinkWeight));
   }
-  return { slope, intercepts, meanIntercept, counts, n: comps.length };
+  return { slope, intercepts, meanIntercept: globalIntercept, counts, n: comps.length };
 }
 
 /** The launched comparables, in the same universe v1 used, for fitting the curve. */
@@ -419,12 +435,12 @@ export function impliedValue(
  * error and the share predicted within 2x, for the curve and for v1.
  */
 export function looBacktest(snapshot: Snapshot, table: CompTable): CurveFit & {
-  backtest: { loo_n: number; v1_msle: number; v2_msle: number; v1_mae_log: number; v2_mae_log: number; v1_within2x: number; v2_within2x: number };
+  backtest: { loo_n: number; v1_msle: number; curve_msle: number; v1_mae_log: number; curve_mae_log: number; v1_within2x: number; curve_within2x: number };
 } {
   const comps = launchedComps(snapshot);
   const fit = fitSizeCurve(comps);
   const v1Err: number[] = [];
-  const v2Err: number[] = [];
+  const curveErr: number[] = [];
   for (let i = 0; i < comps.length; i++) {
     const held = comps[i]!;
     const train = comps.filter((_, j) => j !== i);
@@ -439,8 +455,8 @@ export function looBacktest(snapshot: Snapshot, table: CompTable): CurveFit & {
     const trainFit = fitSizeCurve(train);
     const { multiple: raw } = curveMultipleRaw(held.tvl_usd, held.category, trainFit);
     const mult = clamp(raw, MODEL.multipleFloor, MODEL.multipleCap);
-    const v2Pred = Math.log(Math.max(1, held.tvl_usd * mult * adj.growthMult * adj.maturityMult));
-    v2Err.push(v2Pred - Math.log(held.mcap_usd));
+    const curvePred = Math.log(Math.max(1, held.tvl_usd * mult * adj.growthMult * adj.maturityMult));
+    curveErr.push(curvePred - Math.log(held.mcap_usd));
   }
   const stats = (errs: number[]): { msle: number; mae: number; within2x: number } => ({
     msle: errs.reduce((s, e) => s + e * e, 0) / errs.length,
@@ -448,18 +464,18 @@ export function looBacktest(snapshot: Snapshot, table: CompTable): CurveFit & {
     within2x: errs.filter((e) => Math.abs(e) <= Math.log(2)).length / errs.length,
   });
   const s1 = stats(v1Err);
-  const s2 = stats(v2Err);
+  const s2 = stats(curveErr);
   const round4b = (n: number): number => Math.round(n * 1e4) / 1e4;
   return {
     ...fit,
     backtest: {
       loo_n: comps.length,
       v1_msle: round4b(s1.msle),
-      v2_msle: round4b(s2.msle),
+      curve_msle: round4b(s2.msle),
       v1_mae_log: round4b(s1.mae),
-      v2_mae_log: round4b(s2.mae),
+      curve_mae_log: round4b(s2.mae),
       v1_within2x: round4b(s1.within2x),
-      v2_within2x: round4b(s2.within2x),
+      curve_within2x: round4b(s2.within2x),
     },
   };
 }
@@ -703,6 +719,7 @@ export function buildRadar(snapshot: Snapshot, table: CompTable): { board: Board
       early_size: early,
       live_size: live.length,
       curve_slope: round4(fit.slope),
+      curve_global_intercept: round4(fit.meanIntercept),
       backtest,
     },
     cats,
@@ -735,6 +752,12 @@ export function buildRadar(snapshot: Snapshot, table: CompTable): { board: Board
       p.mcap_usd,
       p.change_7d === null ? null : Math.round(p.change_7d * 100) / 100,
     ]),
+    curvePts: launchedComps(snapshot)
+      .map((c): [number, number] => [
+        Math.round(Math.log(c.tvl_usd) * 1000) / 1000,
+        Math.round(Math.log(c.ratio) * 1000) / 1000,
+      ])
+      .sort((a, b) => a[0] - b[0] || a[1] - b[1]),
   };
   return { board, radar };
 }

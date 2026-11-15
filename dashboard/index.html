@@ -22,18 +22,24 @@
 <main>
   <section class="method" aria-label="How the values are earned">
     <h2>How a value is earned</h2>
-    <p>Each pre-token protocol is priced on a size curve fitted to the launched protocols:
-    log market cap = a category intercept + a shared slope &times; log TVL, fitted by least
-    squares over the 93 launched protocols in this snapshot. A flat category median would
-    give a $1B protocol the same mcap&thinsp;/&thinsp;TVL as a $10M one; the snapshot says
-    otherwise — large protocols trade at lower multiples — and the fitted slope (below 1)
-    captures it. A category's intercept is shrunk toward the mean where it has few launched
-    protocols. That curve multiple is then adjusted for the protocol's 7-day TVL growth and
-    for how long it has run with no token. Nothing is priced from its name, and a protocol
-    is only ever said to <em>record no token</em> — never that it has none.</p>
-    <p>The curve is validated at run time by a leave-one-out backtest on the 93 launched
-    protocols, scored against the flat category-median model on the same folds; the numbers
-    are printed below and in every detail view.</p>
+    <div class="method-grid">
+      <div class="method-text">
+        <p>Each pre-token protocol is priced on a size curve fitted to the launched protocols:
+        log market cap = a category intercept + a shared slope &times; log TVL. The fit is robust:
+        the slope comes from a within-category regression whose residuals are Huber-downweighted,
+        and each category's intercept is the median of its protocols — not a mean — shrunk toward
+        the global median where a category has few launched protocols. A flat median would
+        pay a $1B protocol the same multiple as a $10M one; the chart shows the snapshot
+        says otherwise. That curve multiple is then adjusted for the protocol's 7-day
+        TVL growth and for how long it has run with no token. Nothing is priced from its
+        name, and a protocol is only ever said to <em>record no token</em> — never that
+        it has none.</p>
+        <p>The curve is validated at run time by a leave-one-out backtest on the 93 launched
+        protocols, scored against the flat category-median model on the same folds; the numbers
+        are printed below and in every detail view.</p>
+      </div>
+      <figure class="curve-chart" id="curveChart" aria-label="Launched protocols: mcap over TVL against TVL, with the fitted size curve"></figure>
+    </div>
     <p class="method-meta" id="methodMeta"></p>
   </section>
 
@@ -60,9 +66,9 @@
     <div class="table-wrap">
       <table id="board">
         <thead><tr>
-          <th class="num">#</th><th>Protocol</th><th>Category</th><th>Chains</th>
-          <th class="num">TVL</th><th class="num">7d</th><th class="num">Age</th>
-          <th class="num">Implied value</th><th class="num">Curve &times;</th>
+          <th class="num sortable" data-sort="rank">#</th><th>Protocol</th><th>Category</th><th>Chains</th>
+          <th class="num sortable" data-sort="tvl">TVL</th><th class="num sortable" data-sort="chg">7d</th><th class="num sortable" data-sort="age">Age</th>
+          <th class="num sortable" data-sort="rank">Implied value</th><th class="num">Curve &times;</th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>

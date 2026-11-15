@@ -111,8 +111,8 @@
   // --- header, method, footer -------------------------------------------------------
   var totalImplied = rows.reduce(function (s, r) { return s + r.implied; }, 0);
   var bt = DATA.meta.backtest;
-  var btLine = bt ? ' · LOO backtest on ' + bt.loo_n + ' launched: curve MSLE ' + bt.v2_msle.toFixed(4) +
-    ' vs median ' + bt.v1_msle.toFixed(4) + ' · within 2× ' + Math.round(bt.v2_within2x * 100) + '% vs ' + Math.round(bt.v1_within2x * 100) + '%' : '';
+  var btLine = bt ? ' · LOO backtest on ' + bt.loo_n + ' launched: curve MSLE ' + bt.curve_msle.toFixed(4) +
+    ' vs median ' + bt.v1_msle.toFixed(4) + ' · within 2× ' + Math.round(bt.curve_within2x * 100) + '% vs ' + Math.round(bt.v1_within2x * 100) + '%' : '';
   $('chips').innerHTML =
     '<span class="chip">Watchlist <b>' + DATA.meta.watchlist_size + '</b></span>' +
     '<span class="chip">Board <b>' + DATA.meta.board_size + '</b> rows</span>' +
@@ -124,6 +124,49 @@
     DATA.meta.watchlist_size + ' watchlist + ' + DATA.meta.early_size + ' early)' + btLine + '.';
   $('asOf').textContent = DATA.meta.as_of;
   $('src').textContent = DATA.meta.source;
+
+  // --- the fitted curve, drawn ------------------------------------------------------
+  // One dot per launched protocol: log TVL against log mcap/TVL. The line is the
+  // fitted size curve at the global median intercept: log ratio = intercept +
+  // (slope - 1) * log TVL. Pure SVG, no network, drawn from DATA.curvePts.
+  (function renderCurve() {
+    var box = $('curveChart');
+    if (!box || !DATA.curvePts || !DATA.curvePts.length) return;
+    var pts = DATA.curvePts;
+    var W = 400, H = 150, PL = 34, PR = 8, PT = 8, PB = 22;
+    var xs = pts.map(function (p) { return p[0]; });
+    var ys = pts.map(function (p) { return p[1]; });
+    var x0 = Math.min.apply(null, xs) - 0.3, x1 = Math.max.apply(null, xs) + 0.3;
+    var y0 = Math.min.apply(null, ys) - 0.4, y1 = Math.max.apply(null, ys) + 0.4;
+    function X(v) { return PL + (v - x0) / (x1 - x0) * (W - PL - PR); }
+    function Y(v) { return PT + (y1 - v) / (y1 - y0) * (H - PT - PB); }
+    function f(n, d) { return Math.round(n * Math.pow(10, d)) / Math.pow(10, d); }
+    var slope = DATA.meta.curve_slope, inter = DATA.meta.curve_global_intercept;
+    var lineY0 = inter + (slope - 1) * x0, lineY1 = inter + (slope - 1) * x1;
+    var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Scatter of launched protocols: mcap over TVL falls as TVL grows">';
+    s += '<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#0a1224" rx="8"/>';
+    // gridlines + y ticks at 0.01x, 0.1x, 1x
+    [-4.6052, -2.3026, 0].forEach(function (lv, i) {
+      var lbl = ['0.01&times;', '0.1&times;', '1&times;'][i];
+      s += '<line x1="' + PL + '" y1="' + f(Y(lv), 1) + '" x2="' + (W - PR) + '" y2="' + f(Y(lv), 1) + '" stroke="#22304d" stroke-width="1"/>';
+      s += '<text x="' + (PL - 4) + '" y="' + f(Y(lv) + 3, 1) + '" fill="#8fa3bf" font-size="9" font-family="monospace" text-anchor="end">' + lbl + '</text>';
+    });
+    // x ticks at $10M, $100M, $1B
+    [16.1181, 18.4207, 20.7233].forEach(function (lv, i) {
+      var lbl = ['$10M', '$100M', '$1B'][i];
+      s += '<line x1="' + f(X(lv), 1) + '" y1="' + PT + '" x2="' + f(X(lv), 1) + '" y2="' + (H - PB) + '" stroke="#16223c" stroke-width="1"/>';
+      s += '<text x="' + f(X(lv), 1) + '" y="' + (H - 7) + '" fill="#8fa3bf" font-size="9" font-family="monospace" text-anchor="middle">' + lbl + '</text>';
+    });
+    s += '<text x="' + (W - PR) + '" y="' + (PT + 9) + '" fill="#8fa3bf" font-size="9" font-family="monospace" text-anchor="end">mcap / TVL</text>';
+    s += '<text x="' + PL + '" y="' + (H - 7) + '" fill="#8fa3bf" font-size="9" font-family="monospace">TVL</text>';
+    s += '<line x1="' + f(X(x0), 1) + '" y1="' + f(Y(lineY0), 1) + '" x2="' + f(X(x1), 1) + '" y2="' + f(Y(lineY1), 1) + '" stroke="#f5b942" stroke-width="2"/>';
+    pts.forEach(function (p) {
+      s += '<circle cx="' + f(X(p[0]), 1) + '" cy="' + f(Y(p[1]), 1) + '" r="2.6" fill="#2dd4bf" fill-opacity="0.85"/>';
+    });
+    s += '</svg>';
+    s += '<figcaption>Each dot is one of the 93 launched protocols; the line is the fitted curve. Bigger TVL, lower mcap&thinsp;/&thinsp;TVL — slope ' + slope.toFixed(3) + '.</figcaption>';
+    box.innerHTML = s;
+  })();
 
   // --- state ------------------------------------------------------------------------
   var state = { q: '', cat: 'all', chain: 'all', wl: false, sort: 'rank', tab: 'board', sel: null };
@@ -195,6 +238,10 @@
     var box = $('detail');
     var row = null;
     if (state.sel) for (var i = 0; i < rows.length; i++) if (rows[i].slug === state.sel) { row = rows[i]; break; }
+    // Opening a protocol focuses the page on it: the method box folds away until the
+    // detail is closed, so the whole farm plan fits on one screen.
+    var method = document.querySelector('.method');
+    if (method) method.classList.toggle('collapsed', !!row);
     if (!row) { box.innerHTML = ''; return; }
     var catIdx = DATA.cats.indexOf(row.cat);
     var comp = catIdx >= 0 ? DATA.comps[String(catIdx)] : null;
@@ -206,15 +253,15 @@
         '</b> &times; log TVL. At this TVL the curve gives <b>' + row.rawMult.toFixed(3) +
         '&times;</b>' + (Math.abs(row.rawMult - row.mult) > 0.0005 ? ' (clamped to <b>' + row.mult.toFixed(3) + '&times;</b>)' : '') +
         '; a flat category median would give <b>' + comp[0].toFixed(3) + '&times;</b> from <b>' + row.compN + '</b> launched ' + esc(row.cat) +
-        ' protocols. LOO backtest (93 launched): curve MSLE <b>' + bt.v2_msle.toFixed(4) +
+        ' protocols. LOO backtest (93 launched): curve MSLE <b>' + bt.curve_msle.toFixed(4) +
         '</b> vs median <b>' + bt.v1_msle.toFixed(4) + '</b>.';
     } else if (comp && row.compN > 0) {
       compLine = 'Fitted size curve for ' + esc(row.cat) + ': log mcap = <b>' + row.intercept.toFixed(3) + '</b> + <b>' + slope.toFixed(3) +
         '</b> &times; log TVL. Only <b>' + row.compN + '</b> launched ' + esc(row.cat) + ' protocol' + (row.compN === 1 ? '' : 's') +
-        ' in the snapshot, so its intercept is shrunk toward the mean. LOO backtest (93 launched): curve MSLE <b>' + bt.v2_msle.toFixed(4) + '</b> vs median <b>' + bt.v1_msle.toFixed(4) + '</b>.';
+        ' in the snapshot, so its intercept is shrunk toward the global median. LOO backtest (93 launched): curve MSLE <b>' + bt.curve_msle.toFixed(4) + '</b> vs median <b>' + bt.v1_msle.toFixed(4) + '</b>.';
     } else {
       compLine = 'No launched ' + esc(row.cat) + ' protocol in the snapshot, so the mean category intercept is used: log mcap = <b>' +
-        row.intercept.toFixed(3) + '</b> + <b>' + slope.toFixed(3) + '</b> &times; log TVL. LOO backtest (93 launched): curve MSLE <b>' + bt.v2_msle.toFixed(4) + '</b> vs median <b>' + bt.v1_msle.toFixed(4) + '</b>.';
+        row.intercept.toFixed(3) + '</b> + <b>' + slope.toFixed(3) + '</b> &times; log TVL. LOO backtest (93 launched): curve MSLE <b>' + bt.curve_msle.toFixed(4) + '</b> vs median <b>' + bt.v1_msle.toFixed(4) + '</b>.';
     }
     var compTable = '';
     if (comp && comp[2].length) {
@@ -267,6 +314,9 @@
         '<td class="num mult">' + r.mult.toFixed(3) + '&times;</td></tr>';
     }).join('');
     $('empty').hidden = list.length !== 0;
+    document.querySelectorAll('#board thead th.sortable').forEach(function (th) {
+      th.classList.toggle('sorted', th.getAttribute('data-sort') === state.sort);
+    });
     renderDetail();
     $('liveRows').innerHTML = liveRows.map(function (p) {
       var ratio = (p.mcap !== null && p.tvl > 0) ? (p.mcap / p.tvl).toFixed(3) + '&times;' : 'n/a';
@@ -294,6 +344,13 @@
     render();
   });
   $('q').addEventListener('input', function (e) { state.q = e.target.value; render(); });
+  document.querySelectorAll('#board thead th.sortable').forEach(function (th) {
+    th.addEventListener('click', function () {
+      state.sort = th.getAttribute('data-sort');
+      $('sort').value = state.sort;
+      render();
+    });
+  });
   catSel.addEventListener('change', function (e) { state.cat = e.target.value; render(); });
   chainSel.addEventListener('change', function (e) { state.chain = e.target.value; render(); });
   $('wl').addEventListener('change', function (e) { state.wl = e.target.checked; render(); });

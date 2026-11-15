@@ -22,8 +22,18 @@ h1 { margin: 0; font: 700 30px/1.05 var(--sans); letter-spacing: .14em; }
 main { max-width: 1180px; margin: 0 auto; padding: 0 20px 40px; }
 .method { margin: 14px 0 12px; border: 1px solid var(--line); border-left: 3px solid var(--acc); border-radius: 10px; background: var(--panel); padding: 12px 20px; }
 .method h2 { margin: 0 0 6px; font-size: 13px; letter-spacing: .12em; text-transform: uppercase; color: var(--acc); }
-.method p { margin: 0; color: #c6d2e6; font-size: 14.5px; }
+.method p { margin: 0 0 8px; color: #c6d2e6; font-size: 14.5px; }
+.method p:last-child { margin-bottom: 0; }
+.method-grid { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 20px; align-items: start; }
+@media (max-width: 860px) { .method-grid { grid-template-columns: 1fr; } }
+.curve-chart { margin: 0; }
+.curve-chart svg { display: block; width: 100%; height: auto; }
+.curve-chart figcaption { color: var(--mut); font: 11.5px var(--sans); margin-top: 4px; }
 .method-meta { margin-top: 8px !important; color: var(--mut) !important; font: 12.5px var(--mono); }
+.method.collapsed { padding: 8px 20px; }
+.method.collapsed .method-grid, .method.collapsed .method-meta { display: none; }
+.method.collapsed h2 { margin: 0; }
+.method.collapsed h2::after { content: ' — hidden while a protocol is open; close the detail to read it again'; text-transform: none; letter-spacing: 0; color: var(--mut); }
 .tabs { display: flex; gap: 6px; margin: 4px 0 10px; }
 .tab { border: 1px solid var(--line); background: transparent; color: var(--mut); border-radius: 8px; padding: 8px 16px; font: 600 13.5px var(--sans); cursor: pointer; }
 .tab.on { background: var(--acc); border-color: var(--acc); color: #06231d; }
@@ -37,6 +47,9 @@ main { max-width: 1180px; margin: 0 auto; padding: 0 20px 40px; }
 .table-wrap { border: 1px solid var(--line); border-radius: 10px; overflow: auto; background: var(--panel2); }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 thead th { text-align: left; padding: 10px 12px; color: var(--mut); font: 600 11.5px var(--sans); letter-spacing: .09em; text-transform: uppercase; border-bottom: 1px solid var(--line); background: #0e1930; position: sticky; top: 0; }
+thead th.sortable { cursor: pointer; }
+thead th.sortable:hover { color: var(--ink); }
+thead th.sorted { color: var(--acc); }
 tbody td { padding: 9px 12px; border-bottom: 1px solid #16223c; vertical-align: middle; }
 tbody tr { cursor: pointer; }
 tbody tr:hover { background: #13203c; }
@@ -69,7 +82,7 @@ tr.r2 .rank, tr.r3 .rank { background: #2b3f66; color: #fff; }
 .comps { width: auto; }
 .comps td, .comps th { padding: 6px 14px 6px 0; border: none; }
 .steps { margin: 0; padding: 0; list-style: none; counter-reset: st; }
-.steps li { counter-increment: st; position: relative; padding: 6px 12px 6px 46px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 5px; background: var(--panel); }
+.steps li { counter-increment: st; position: relative; padding: 5px 12px 5px 46px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 4px; background: var(--panel); }
 .steps li::before { content: counter(st); position: absolute; left: 12px; top: 6px; width: 24px; height: 24px; border-radius: 50%; background: var(--acc); color: #06231d; font: 700 13px/24px var(--sans); text-align: center; }
 .steps .ct { display: block; color: var(--mut); font: 12px var(--mono); margin-top: 3px; }
 .live-note { color: var(--mut); font-size: 14px; margin: 0 0 12px; }
