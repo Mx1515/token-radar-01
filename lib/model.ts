@@ -1,21 +1,27 @@
-// Token Radar: a comps-based implied-value model for pre-token protocols.
+// Token Radar: a fitted size-curve implied-value model for pre-token protocols.
 //
 // The board covers every slug in the sealed snapshot's watchlist (the floor, never the
 // ceiling) and adds the strongest pre-token protocols below the floor, by TVL.
 //
 // Implied value is earned from the snapshot's own figures, never from a name list:
-// for each pre-token protocol the model prices it like the launched protocols in the
-// same category (their market-cap / TVL ratios), shrunk toward the global launched
-// median where a category has few comparables:
+// for each pre-token protocol the model fits a size curve to the launched protocols —
+// log market cap against log TVL, one intercept per category and one shared slope,
+// least squares over the launched comparables — and prices the protocol on that curve:
 //
-//   comps(p)    = launched protocols in p's category, TVL >= $5M, ratio in [0.001, 5]
-//   catMedian   = median ratio of comps(p) (null when fewer than 3 comps)
-//   globalMed   = median ratio of all launched protocols
-//   multiple    = catMedian ? (n*catMedian + 6*globalMed) / (n + 6) : globalMed
-//   multiple    = clamp(multiple, 0.02, 1.50)
-//   growthMult  = 1 + clamp(change_7d, -60, 120) / 100 * 0.5
-//   maturity    = 0.6 + min(age_days ?? 365, 1095) / 1095 * 0.4
-//   implied     = max(1, round(tvl_usd * multiple * growthMult * maturity))
+//   log mcap = intercept[category] + slope * log TVL        (fitted, not assumed)
+//   multiple = exp(intercept + (slope - 1) * log TVL), clamped [0.02, 1.5]
+//   implied  = TVL * multiple * growthMult * maturityMult
+//
+// A flat category median assumes big protocols trade at the same mcap/TVL as small
+// ones; the snapshot says otherwise (corr(log ratio, log TVL) = -0.44), and the fitted
+// slope (about 0.55, well under 1) captures it: larger protocols earn a lower multiple.
+// Category intercepts are shrunk toward their mean where a category has few launched
+// protocols, exactly as the v1 median was shrunk toward the global median. Growth
+// (7-day TVL change) and maturity (age with no token) adjust the curve value exactly
+// as v1 did. The curve is validated, at run time, by a leave-one-out backtest on the
+// launched protocols: each one is held out, the curve is refit without it, and its
+// market cap is predicted — the same test is run for the v1 category-median model,
+// and the dashboard reports both scores.
 //
 // A protocol records no token (all three of mcap_usd, gecko_id, symbol null); the board
 // says so and never claims it has none. Wrapped, staked and bridged products of tokens
@@ -85,7 +91,7 @@ export const MODEL = {
   ratioCap: 5,
 } as const;
 
-export const MODEL_VERSION = 'radar-2-comps';
+export const MODEL_VERSION = 'radar-3-curve';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries. */
 export const EARLY_ROWS = 160;
@@ -125,6 +131,9 @@ export interface BoardRow {
     growth_multiplier: number;
     maturity_multiplier: number;
     age_days: number | null;
+    curve_slope: number;
+    curve_intercept: number;
+    curve_multiple_raw: number;
   };
   farm_steps: string[];
 }
@@ -132,8 +141,8 @@ export interface BoardRow {
 /** The dashboard's compact view of one row, as a positional array:
  * [rank, slug, name, catIdx, chainIdxs, tvl_usd, change_7d, age_days,
  *  implied_value_usd, comp_multiple, comp_count, growth_multiplier,
- *  maturity_multiplier, watchlist 0/1]. */
-export type RadarRow = [number, string, string, number, number[], number, number | null, number | null, number, number, number, number, number, number];
+ *  maturity_multiplier, watchlist 0/1, curve_intercept, curve_multiple_raw]. */
+export type RadarRow = [number, string, string, number, number[], number, number | null, number | null, number, number, number, number, number, number, number, number];
 
 /** A live-token protocol: [slug, name, catIdx, chainIdxs, tvl_usd, mcap_usd, change_7d]. */
 export type LiveRow = [string, string, number, number[], number, number | null, number | null];
@@ -150,6 +159,16 @@ export interface RadarData {
     board_size: number;
     early_size: number;
     live_size: number;
+    curve_slope: number;
+    backtest: {
+      loo_n: number;
+      v1_msle: number;
+      v2_msle: number;
+      v1_mae_log: number;
+      v2_mae_log: number;
+      v1_within2x: number;
+      v2_within2x: number;
+    };
   };
   cats: string[];
   chains: string[];
@@ -265,25 +284,206 @@ export function compMultiple(category: string | null, table: CompTable): { multi
   return { multiple: clamp(table.globalMedian, MODEL.multipleFloor, MODEL.multipleCap), median: null, count: entry?.n ?? 0 };
 }
 
-/** The multipliers and implied value one protocol gets under the comps model. */
-export function impliedValue(
-  protocol: SnapshotProtocol,
-  asOf: string,
-  table: CompTable,
-): { implied: number; multiple: number; median: number | null; count: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null } {
+/** The fitted size curve: one shared log-log slope, one intercept per category. */
+export interface CurveFit {
+  slope: number;
+  intercepts: Map<string, number>;
+  meanIntercept: number;
+  counts: Map<string, number>;
+  n: number;
+}
+
+/** Solve A x = b by Gaussian elimination with partial pivoting. A is small and dense. */
+function solveLinear(Ain: number[][], bin: number[]): number[] {
+  const n = bin.length;
+  const A = Ain.map((row) => [...row]);
+  const b = [...bin];
+  for (let col = 0; col < n; col++) {
+    let piv = col;
+    for (let r = col + 1; r < n; r++) if (Math.abs(A[r]![col]!) > Math.abs(A[piv]![col]!)) piv = r;
+    if (Math.abs(A[piv]![col]!) < 1e-12) throw new SnapshotError('size curve is singular: launched comparables do not identify it');
+    if (piv !== col) {
+      [A[col], A[piv]] = [A[piv]!, A[col]!];
+      [b[col], b[piv]] = [b[piv]!, b[col]!];
+    }
+    for (let r = col + 1; r < n; r++) {
+      const f = A[r]![col]! / A[col]![col]!;
+      for (let c = col; c < n; c++) A[r]![c]! -= f * A[col]![c]!;
+      b[r]! -= f * b[col]!;
+    }
+  }
+  const x = new Array<number>(n).fill(0);
+  for (let r = n - 1; r >= 0; r--) {
+    let s = b[r]!;
+    for (let c = r + 1; c < n; c++) s -= A[r]![c]! * x[c]!;
+    x[r] = s / A[r]![r]!;
+  }
+  return x;
+}
+
+/**
+ * Fit log mcap = intercept[category] + slope * log TVL by least squares over the
+ * launched comparables. Categories are sorted, so the fit is deterministic; a
+ * category's intercept is shrunk toward the mean intercept with the same weight (6)
+ * v1 used to shrink a category median toward the global median.
+ */
+export function fitSizeCurve(comps: Comp[]): CurveFit {
+  const cats = [...new Set(comps.map((c) => c.category ?? '(no category)'))].sort();
+  const k = cats.length;
+  const idx = new Map(cats.map((c, i) => [c, i]));
+  // Normal equations for [dummies..., slope]: A = X'X, b = X'y.
+  const A: number[][] = Array.from({ length: k + 1 }, () => new Array<number>(k + 1).fill(0));
+  const b: number[] = new Array<number>(k + 1).fill(0);
+  for (const c of comps) {
+    const row = new Array<number>(k + 1).fill(0);
+    row[idx.get(c.category ?? '(no category)')!] = 1;
+    row[k] = Math.log(c.tvl_usd);
+    const y = Math.log(c.mcap_usd);
+    for (let i = 0; i <= k; i++) {
+      b[i]! += row[i]! * y;
+      for (let j = 0; j <= k; j++) A[i]![j]! += row[i]! * row[j]!;
+    }
+  }
+  const beta = solveLinear(A, b);
+  const slope = beta[k]!;
+  const raw = new Map(cats.map((c, i) => [c, beta[i]!]));
+  const meanIntercept = cats.reduce((s, c) => s + raw.get(c)!, 0) / cats.length;
+  const counts = new Map<string, number>();
+  for (const c of comps) {
+    const key = c.category ?? '(no category)';
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const intercepts = new Map<string, number>();
+  for (const c of cats) {
+    const n = counts.get(c) ?? 0;
+    intercepts.set(c, (n * raw.get(c)! + MODEL.shrinkWeight * meanIntercept) / (n + MODEL.shrinkWeight));
+  }
+  return { slope, intercepts, meanIntercept, counts, n: comps.length };
+}
+
+/** The launched comparables, in the same universe v1 used, for fitting the curve. */
+export function launchedComps(snapshot: Snapshot): Comp[] {
+  const usable: Comp[] = [];
+  for (const p of snapshot.protocols) {
+    if (isPreToken(p) || p.mcap_usd === null || p.tvl_usd < MODEL.minCompTvl) continue;
+    if (p.category !== null && (p.category === 'CEX' || p.category === 'Bridge' || p.category === 'Canonical Bridge' || p.category === 'Cross Chain Bridge' || p.category === 'Token Locker')) continue;
+    const ratio = p.mcap_usd / p.tvl_usd;
+    if (!Number.isFinite(ratio) || ratio < MODEL.ratioFloor || ratio > MODEL.ratioCap) continue;
+    usable.push({ slug: p.slug, name: p.name, category: p.category, tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd, ratio });
+  }
+  return usable;
+}
+
+/** The shrunk intercept for a category, or the mean intercept when it has no comps. */
+function curveIntercept(category: string | null, fit: CurveFit): number {
+  return fit.intercepts.get(category ?? '(no category)') ?? fit.meanIntercept;
+}
+
+/** The fitted multiple for a TVL, before clamping, under the size curve. */
+export function curveMultipleRaw(tvlUsd: number, category: string | null, fit: CurveFit): { multiple: number; intercept: number } {
+  const intercept = curveIntercept(category, fit);
+  const multiple = Math.exp(intercept + (fit.slope - 1) * Math.log(tvlUsd));
+  return { multiple, intercept };
+}
+
+/** The growth and maturity multipliers, unchanged from v1. */
+function growthMaturity(protocol: SnapshotProtocol, asOf: string): { growthPct: number; growthMult: number; maturityMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
-  const { multiple, median: catMedian, count } = compMultiple(protocol.category, table);
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = clamp(rawGrowth, MODEL.growthFloor, MODEL.growthCap);
   const growthMult = 1 + (growthPct / 100) * MODEL.growthWeight;
   const ageForModel = age ?? MODEL.unknownAgeDays;
   const maturityMult = MODEL.maturityFloor + (Math.min(Math.max(ageForModel, 0), MODEL.maturityDays) / MODEL.maturityDays) * MODEL.maturityRange;
+  return { growthPct, growthMult, maturityMult, age };
+}
+
+/** The multipliers and implied value one protocol gets under the size-curve model. */
+export function impliedValue(
+  protocol: SnapshotProtocol,
+  asOf: string,
+  table: CompTable,
+  fit: CurveFit,
+): { implied: number; multiple: number; rawMultiple: number; intercept: number; median: number | null; count: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null } {
+  const { multiple: rawMultiple, intercept } = curveMultipleRaw(protocol.tvl_usd, protocol.category, fit);
+  const multiple = clamp(rawMultiple, MODEL.multipleFloor, MODEL.multipleCap);
+  const { median: catMedian, count } = compMultiple(protocol.category, table);
+  const { growthPct, growthMult, maturityMult, age } = growthMaturity(protocol, asOf);
   const implied = Math.max(1, Math.round(protocol.tvl_usd * multiple * growthMult * maturityMult));
-  return { implied, multiple, median: catMedian, count, growthPct, growthMult, maturityMult, age };
+  return { implied, multiple, rawMultiple, intercept, median: catMedian, count, growthPct, growthMult, maturityMult, age };
+}
+
+/**
+ * Leave-one-out backtest on the launched comparables: hold each one out, refit the
+ * size curve without it (and rebuild the v1 baseline without it), predict its market
+ * cap, and score the log error. Returns mean squared log error, mean absolute log
+ * error and the share predicted within 2x, for the curve and for v1.
+ */
+export function looBacktest(snapshot: Snapshot, table: CompTable): CurveFit & {
+  backtest: { loo_n: number; v1_msle: number; v2_msle: number; v1_mae_log: number; v2_mae_log: number; v1_within2x: number; v2_within2x: number };
+} {
+  const comps = launchedComps(snapshot);
+  const fit = fitSizeCurve(comps);
+  const v1Err: number[] = [];
+  const v2Err: number[] = [];
+  for (let i = 0; i < comps.length; i++) {
+    const held = comps[i]!;
+    const train = comps.filter((_, j) => j !== i);
+    const heldProto = snapshot.protocols.find((p) => p.slug === held.slug)!;
+    const adj = growthMaturity(heldProto, snapshot.as_of);
+    // v1 baseline refit without the held-out protocol, same growth/maturity.
+    const trainTable = buildCompTableFrom(train);
+    const v1 = compMultiple(held.category, trainTable);
+    const v1Pred = Math.log(Math.max(1, held.tvl_usd * v1.multiple * adj.growthMult * adj.maturityMult));
+    v1Err.push(v1Pred - Math.log(held.mcap_usd));
+    // Size curve refit without the held-out protocol.
+    const trainFit = fitSizeCurve(train);
+    const { multiple: raw } = curveMultipleRaw(held.tvl_usd, held.category, trainFit);
+    const mult = clamp(raw, MODEL.multipleFloor, MODEL.multipleCap);
+    const v2Pred = Math.log(Math.max(1, held.tvl_usd * mult * adj.growthMult * adj.maturityMult));
+    v2Err.push(v2Pred - Math.log(held.mcap_usd));
+  }
+  const stats = (errs: number[]): { msle: number; mae: number; within2x: number } => ({
+    msle: errs.reduce((s, e) => s + e * e, 0) / errs.length,
+    mae: errs.reduce((s, e) => s + Math.abs(e), 0) / errs.length,
+    within2x: errs.filter((e) => Math.abs(e) <= Math.log(2)).length / errs.length,
+  });
+  const s1 = stats(v1Err);
+  const s2 = stats(v2Err);
+  const round4b = (n: number): number => Math.round(n * 1e4) / 1e4;
+  return {
+    ...fit,
+    backtest: {
+      loo_n: comps.length,
+      v1_msle: round4b(s1.msle),
+      v2_msle: round4b(s2.msle),
+      v1_mae_log: round4b(s1.mae),
+      v2_mae_log: round4b(s2.mae),
+      v1_within2x: round4b(s1.within2x),
+      v2_within2x: round4b(s2.within2x),
+    },
+  };
+}
+
+/** A comp table built from an explicit comparables list (for the backtest's refits). */
+function buildCompTableFrom(usable: Comp[]): CompTable {
+  const globalMedian = median(usable.map((c) => c.ratio)) ?? 0.17;
+  const byCategory = new Map<string, CategoryComps>();
+  const cats = new Map<string, Comp[]>();
+  for (const c of usable) {
+    const key = c.category ?? '(no category)';
+    const list = cats.get(key) ?? [];
+    list.push(c);
+    cats.set(key, list);
+  }
+  for (const [cat, list] of cats) {
+    const top = [...list].sort((a, b) => b.mcap_usd - a.mcap_usd).slice(0, 3);
+    byCategory.set(cat, { median: median(list.map((c) => c.ratio)), n: list.length, top });
+  }
+  return { globalMedian, byCategory };
 }
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
-export function buildBoard(snapshot: Snapshot, table: CompTable): BoardRow[] {
+export function buildBoard(snapshot: Snapshot, table: CompTable, fit: CurveFit): BoardRow[] {
   const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
   const chosen = new Map<string, SnapshotProtocol>();
   for (const slug of snapshot.watchlist) {
@@ -296,7 +496,7 @@ export function buildBoard(snapshot: Snapshot, table: CompTable): BoardRow[] {
     .slice(0, EARLY_ROWS);
   for (const p of early) chosen.set(p.slug, p);
 
-  const scored = [...chosen.values()].map((p) => ({ p, v: impliedValue(p, snapshot.as_of, table) }));
+  const scored = [...chosen.values()].map((p) => ({ p, v: impliedValue(p, snapshot.as_of, table, fit) }));
   scored.sort((a, b) => b.v.implied - a.v.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
     rank: i + 1,
@@ -322,6 +522,9 @@ export function buildBoard(snapshot: Snapshot, table: CompTable): BoardRow[] {
       growth_multiplier: round4(s.v.growthMult),
       maturity_multiplier: round4(s.v.maturityMult),
       age_days: s.v.age,
+      curve_slope: round4(fit.slope),
+      curve_intercept: round4(s.v.intercept),
+      curve_multiple_raw: round4(s.v.rawMultiple),
     },
     farm_steps: farmSteps(s.p, s.v.age).map(stepText),
   }));
@@ -448,7 +651,8 @@ export function liveRows(snapshot: Snapshot): SnapshotProtocol[] {
 
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot, table: CompTable): { board: BoardRow[]; radar: RadarData } {
-  const board = buildBoard(snapshot, table);
+  const { backtest, ...fit } = looBacktest(snapshot, table);
+  const board = buildBoard(snapshot, table, fit);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
 
@@ -498,6 +702,8 @@ export function buildRadar(snapshot: Snapshot, table: CompTable): { board: Board
       board_size: board.length,
       early_size: early,
       live_size: live.length,
+      curve_slope: round4(fit.slope),
+      backtest,
     },
     cats,
     chains,
@@ -517,6 +723,8 @@ export function buildRadar(snapshot: Snapshot, table: CompTable): { board: Board
       Math.round(r.model.growth_multiplier * 1000) / 1000,
       Math.round(r.model.maturity_multiplier * 1000) / 1000,
       snapshot.watchlist.includes(r.slug) ? 1 : 0,
+      Math.round(r.model.curve_intercept * 1000) / 1000,
+      Math.round(r.model.curve_multiple_raw * 1000) / 1000,
     ]),
     live: live.map((p): LiveRow => [
       p.slug,

@@ -22,11 +22,18 @@
 <main>
   <section class="method" aria-label="How the values are earned">
     <h2>How a value is earned</h2>
-    <p>Each pre-token protocol is priced like the launched protocols in its own category: their
-    market-cap&thinsp;/&thinsp;TVL ratios, shrunk toward the global launched median where a category has few
-    comparables. That multiple is then adjusted for the protocol's 7-day TVL growth and for how long it
-    has run with no token. Nothing is priced from its name, and a protocol is only ever said to
-    <em>record no token</em> — never that it has none.</p>
+    <p>Each pre-token protocol is priced on a size curve fitted to the launched protocols:
+    log market cap = a category intercept + a shared slope &times; log TVL, fitted by least
+    squares over the 93 launched protocols in this snapshot. A flat category median would
+    give a $1B protocol the same mcap&thinsp;/&thinsp;TVL as a $10M one; the snapshot says
+    otherwise — large protocols trade at lower multiples — and the fitted slope (below 1)
+    captures it. A category's intercept is shrunk toward the mean where it has few launched
+    protocols. That curve multiple is then adjusted for the protocol's 7-day TVL growth and
+    for how long it has run with no token. Nothing is priced from its name, and a protocol
+    is only ever said to <em>record no token</em> — never that it has none.</p>
+    <p>The curve is validated at run time by a leave-one-out backtest on the 93 launched
+    protocols, scored against the flat category-median model on the same folds; the numbers
+    are printed below and in every detail view.</p>
     <p class="method-meta" id="methodMeta"></p>
   </section>
 
@@ -55,7 +62,7 @@
         <thead><tr>
           <th class="num">#</th><th>Protocol</th><th>Category</th><th>Chains</th>
           <th class="num">TVL</th><th class="num">7d</th><th class="num">Age</th>
-          <th class="num">Implied value</th><th class="num">Multiple</th>
+          <th class="num">Implied value</th><th class="num">Curve &times;</th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>

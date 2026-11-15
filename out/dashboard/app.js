@@ -74,7 +74,7 @@
 
   // --- decoding --------------------------------------------------------------------
   function dec(a) {
-    return { rank: a[0], slug: a[1], name: a[2], cat: DATA.cats[a[3]], chains: a[4].map(function (i) { return DATA.chains[i]; }), tvl: a[5], chg: a[6], age: a[7], implied: a[8], mult: a[9], compN: a[10], gMult: a[11], mMult: a[12], wl: a[13] === 1 };
+    return { rank: a[0], slug: a[1], name: a[2], cat: DATA.cats[a[3]], chains: a[4].map(function (i) { return DATA.chains[i]; }), tvl: a[5], chg: a[6], age: a[7], implied: a[8], mult: a[9], compN: a[10], gMult: a[11], mMult: a[12], wl: a[13] === 1, intercept: a[14], rawMult: a[15] };
   }
   function decLive(a) {
     return { slug: a[0], name: a[1], cat: DATA.cats[a[2]], chains: a[3].map(function (i) { return DATA.chains[i]; }), tvl: a[4], mcap: a[5], chg: a[6] };
@@ -110,14 +110,18 @@
 
   // --- header, method, footer -------------------------------------------------------
   var totalImplied = rows.reduce(function (s, r) { return s + r.implied; }, 0);
+  var bt = DATA.meta.backtest;
+  var btLine = bt ? ' · LOO backtest on ' + bt.loo_n + ' launched: curve MSLE ' + bt.v2_msle.toFixed(4) +
+    ' vs median ' + bt.v1_msle.toFixed(4) + ' · within 2× ' + Math.round(bt.v2_within2x * 100) + '% vs ' + Math.round(bt.v1_within2x * 100) + '%' : '';
   $('chips').innerHTML =
     '<span class="chip">Watchlist <b>' + DATA.meta.watchlist_size + '</b></span>' +
     '<span class="chip">Board <b>' + DATA.meta.board_size + '</b> rows</span>' +
     '<span class="chip">Total implied <b>' + fmtUsd(totalImplied) + '</b></span>' +
+    '<span class="chip">Curve slope <b>' + DATA.meta.curve_slope.toFixed(3) + '</b></span>' +
     '<span class="chip">Global comp median <b>' + DATA.meta.global_median.toFixed(3) + '&times;</b></span>';
   $('methodMeta').textContent = 'Snapshot ' + DATA.meta.as_of + ' · watchlist floor $50,000,000 · model ' + DATA.meta.model_version +
-    ' · global launched mcap/TVL median ' + DATA.meta.global_median.toFixed(3) + '× · ' + DATA.meta.board_size + ' rows (' +
-    DATA.meta.watchlist_size + ' watchlist + ' + DATA.meta.early_size + ' early).';
+    ' · fitted slope ' + DATA.meta.curve_slope.toFixed(4) + ' · global launched mcap/TVL median ' + DATA.meta.global_median.toFixed(3) + '× · ' + DATA.meta.board_size + ' rows (' +
+    DATA.meta.watchlist_size + ' watchlist + ' + DATA.meta.early_size + ' early)' + btLine + '.';
   $('asOf').textContent = DATA.meta.as_of;
   $('src').textContent = DATA.meta.source;
 
@@ -195,15 +199,22 @@
     var catIdx = DATA.cats.indexOf(row.cat);
     var comp = catIdx >= 0 ? DATA.comps[String(catIdx)] : null;
     var base = row.tvl * row.mult;
+    var slope = DATA.meta.curve_slope;
     var compLine;
     if (comp && comp[0] !== null && row.compN >= 3) {
-      compLine = 'Category median <b>' + comp[0].toFixed(3) + '&times;</b> from <b>' + row.compN + '</b> launched ' + esc(row.cat) +
-        ' protocols, shrunk toward the global median <b>' + DATA.meta.global_median.toFixed(3) + '&times;</b>.';
+      compLine = 'Fitted size curve for ' + esc(row.cat) + ': log mcap = <b>' + row.intercept.toFixed(3) + '</b> + <b>' + slope.toFixed(3) +
+        '</b> &times; log TVL. At this TVL the curve gives <b>' + row.rawMult.toFixed(3) +
+        '&times;</b>' + (Math.abs(row.rawMult - row.mult) > 0.0005 ? ' (clamped to <b>' + row.mult.toFixed(3) + '&times;</b>)' : '') +
+        '; a flat category median would give <b>' + comp[0].toFixed(3) + '&times;</b> from <b>' + row.compN + '</b> launched ' + esc(row.cat) +
+        ' protocols. LOO backtest (93 launched): curve MSLE <b>' + bt.v2_msle.toFixed(4) +
+        '</b> vs median <b>' + bt.v1_msle.toFixed(4) + '</b>.';
     } else if (comp && row.compN > 0) {
-      compLine = 'Only <b>' + row.compN + '</b> launched ' + esc(row.cat) + ' protocol' + (row.compN === 1 ? '' : 's') +
-        ' in the snapshot, so the global median <b>' + DATA.meta.global_median.toFixed(3) + '&times;</b> is used.';
+      compLine = 'Fitted size curve for ' + esc(row.cat) + ': log mcap = <b>' + row.intercept.toFixed(3) + '</b> + <b>' + slope.toFixed(3) +
+        '</b> &times; log TVL. Only <b>' + row.compN + '</b> launched ' + esc(row.cat) + ' protocol' + (row.compN === 1 ? '' : 's') +
+        ' in the snapshot, so its intercept is shrunk toward the mean. LOO backtest (93 launched): curve MSLE <b>' + bt.v2_msle.toFixed(4) + '</b> vs median <b>' + bt.v1_msle.toFixed(4) + '</b>.';
     } else {
-      compLine = 'No launched ' + esc(row.cat) + ' protocol in the snapshot, so the global median <b>' + DATA.meta.global_median.toFixed(3) + '&times;</b> is used.';
+      compLine = 'No launched ' + esc(row.cat) + ' protocol in the snapshot, so the mean category intercept is used: log mcap = <b>' +
+        row.intercept.toFixed(3) + '</b> + <b>' + slope.toFixed(3) + '</b> &times; log TVL. LOO backtest (93 launched): curve MSLE <b>' + bt.v2_msle.toFixed(4) + '</b> vs median <b>' + bt.v1_msle.toFixed(4) + '</b>.';
     }
     var compTable = '';
     if (comp && comp[2].length) {
@@ -226,10 +237,10 @@
       '<div class="dstat"><div class="k">TVL</div><div class="v">' + fmtUsd(row.tvl) + '</div></div>' +
       '<div class="dstat"><div class="k">7-day change</div><div class="v">' + fmtPct(row.chg) + '</div></div>' +
       '<div class="dstat"><div class="k">Age, no token</div><div class="v">' + fmtAge(row.age) + '</div></div>' +
-      '<div class="dstat"><div class="k">Comp multiple</div><div class="v">' + row.mult.toFixed(3) + '&times;</div></div>' +
+      '<div class="dstat"><div class="k">Curve multiple</div><div class="v">' + row.mult.toFixed(3) + '&times;</div></div>' +
       '</div>' +
       '<h3>How the value was computed</h3>' +
-      '<div class="math">' + fmtFull(row.tvl) + ' TVL &times; <b>' + row.mult.toFixed(3) + '&times;</b> comp multiple = ' + fmtFull(Math.round(base)) +
+      '<div class="math">' + fmtFull(row.tvl) + ' TVL &times; <b>' + row.mult.toFixed(3) + '&times;</b> curve multiple = ' + fmtFull(Math.round(base)) +
       '<br>&times; <b>' + row.gMult.toFixed(4) + '</b> growth (' + fmtPct(row.chg) + ' over 7 days)' +
       ' &times; <b>' + row.mMult.toFixed(4) + '</b> maturity (' + (row.age === null ? 'listing date unreported, 365 days assumed' : fmtAge(row.age) + ' listed') + ')' +
       '<br>= <b>' + fmtFull(row.implied) + '</b> implied value</div>' +

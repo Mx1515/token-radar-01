@@ -83,8 +83,10 @@ for (const name of shots) {
 writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: DASHBOARD_CAPS }));
 
 const totalImplied = board.reduce((sum, r) => sum + r.implied_value_usd, 0);
+const bt = radar.meta.backtest;
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.meta.early_size} early, ${radar.meta.live_size} live set aside)\n` +
-    `token radar: global launched mcap/TVL median ${radar.meta.global_median}, board total implied $${totalImplied.toLocaleString('en-US')}\n` +
+    `token radar: size curve slope ${radar.meta.curve_slope}, global launched mcap/TVL median ${radar.meta.global_median}, board total implied $${totalImplied.toLocaleString('en-US')}\n` +
+    `token radar: leave-one-out backtest on ${bt.loo_n} launched protocols — curve MSLE ${bt.v2_msle} vs v1 median ${bt.v1_msle}, within 2x ${bt.v2_within2x} vs ${bt.v1_within2x}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
