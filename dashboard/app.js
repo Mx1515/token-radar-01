@@ -125,11 +125,27 @@
   $('asOf').textContent = DATA.meta.as_of;
   $('src').textContent = DATA.meta.source;
 
+  // --- the backtest, as a table -----------------------------------------------------
+  (function renderBacktest() {
+    var box = $('btWrap');
+    if (!box || !bt) return;
+    function pct(x) { return (x * 100).toFixed(1) + '%'; }
+    box.innerHTML = '<table class="bttable"><thead><tr><th>Leave-one-out backtest, ' + bt.loo_n +
+      ' launched protocols</th><th class="num">v1 category median</th><th class="num">v4 pooled curve</th></tr></thead><tbody>' +
+      '<tr><td>Mean squared log error</td><td class="num">' + bt.v1_msle.toFixed(4) + '</td><td class="num"><b>' + bt.curve_msle.toFixed(4) + '</b></td></tr>' +
+      '<tr><td>Mean absolute log error</td><td class="num">' + bt.v1_mae_log.toFixed(4) + '</td><td class="num"><b>' + bt.curve_mae_log.toFixed(4) + '</b></td></tr>' +
+      '<tr><td>Predicted within 2&times; of true market cap</td><td class="num">' + pct(bt.v1_within2x) + '</td><td class="num"><b>' + pct(bt.curve_within2x) + '</b></td></tr>' +
+      '</tbody></table>';
+  })();
+
   // --- the fitted curve, drawn ------------------------------------------------------
   // One dot per launched protocol: log TVL against log mcap/TVL. The line is the
   // fitted size curve at the global median intercept: log ratio = intercept +
-  // (slope - 1) * log TVL. Pure SVG, no network, drawn from DATA.curvePts.
-  (function renderCurve() {
+  // (slope - 1) * log TVL. Pick a category above the chart to draw that category's
+  // own line and highlight its protocols instead. Pure SVG, no network, drawn from
+  // DATA.curvePts and DATA.curveCats.
+  var curveCat = null;
+  function renderCurve() {
     var box = $('curveChart');
     if (!box || !DATA.curvePts || !DATA.curvePts.length) return;
     var pts = DATA.curvePts;
@@ -142,8 +158,21 @@
     function Y(v) { return PT + (y1 - v) / (y1 - y0) * (H - PT - PB); }
     function f(n, d) { return Math.round(n * Math.pow(10, d)) / Math.pow(10, d); }
     var slope = DATA.meta.curve_slope, inter = DATA.meta.curve_global_intercept;
+    var selIdx = -1, selName = null, selN = 0;
+    if (curveCat !== null) {
+      selName = curveCat;
+      selIdx = DATA.cats.indexOf(curveCat);
+      for (var ci = 0; ci < DATA.curveCats.length; ci++) {
+        if (DATA.curveCats[ci][0] === curveCat) { inter = DATA.curveCats[ci][1]; break; }
+      }
+      pts.forEach(function (p) { if (p[2] === selIdx) selN++; });
+    }
     var lineY0 = inter + (slope - 1) * x0, lineY1 = inter + (slope - 1) * x1;
-    var s = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Scatter of launched protocols: mcap over TVL falls as TVL grows">';
+    var chips = '<div class="catchips"><button type="button" class="catchip' + (curveCat === null ? ' on' : '') + '" data-cat="">All categories</button>' +
+      DATA.curveCats.map(function (cc) {
+        return '<button type="button" class="catchip' + (curveCat === cc[0] ? ' on' : '') + '" data-cat="' + esc(cc[0]) + '">' + esc(cc[0]) + '</button>';
+      }).join('') + '</div>';
+    var s = chips + '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Scatter of launched protocols: mcap over TVL falls as TVL grows">';
     s += '<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#0a1224" rx="8"/>';
     // gridlines + y ticks at 0.01x, 0.1x, 1x
     [-4.6052, -2.3026, 0].forEach(function (lv, i) {
@@ -161,12 +190,24 @@
     s += '<text x="' + PL + '" y="' + (H - 7) + '" fill="#8fa3bf" font-size="9" font-family="monospace">TVL</text>';
     s += '<line x1="' + f(X(x0), 1) + '" y1="' + f(Y(lineY0), 1) + '" x2="' + f(X(x1), 1) + '" y2="' + f(Y(lineY1), 1) + '" stroke="#f5b942" stroke-width="2"/>';
     pts.forEach(function (p) {
-      s += '<circle cx="' + f(X(p[0]), 1) + '" cy="' + f(Y(p[1]), 1) + '" r="2.6" fill="#2dd4bf" fill-opacity="0.85"/>';
+      var on = selIdx < 0 || p[2] === selIdx;
+      s += '<circle cx="' + f(X(p[0]), 1) + '" cy="' + f(Y(p[1]), 1) + '" r="' + (on ? 2.8 : 2.2) + '" fill="#2dd4bf" fill-opacity="' + (on ? 0.9 : 0.14) + '"/>';
     });
     s += '</svg>';
-    s += '<figcaption>Each dot is one of the 93 launched protocols; the line is the fitted curve. Bigger TVL, lower mcap&thinsp;/&thinsp;TVL — slope ' + slope.toFixed(3) + '.</figcaption>';
+    s += '<figcaption>' + (selName !== null
+      ? 'Showing ' + esc(selName) + ' — ' + selN + ' of the 93 launched protocols; the line is that category\u2019s fitted curve (intercept ' + inter.toFixed(3) + ').'
+      : 'Each dot is one of the 93 launched protocols; the line is the fitted curve. Bigger TVL, lower mcap&thinsp;/&thinsp;TVL — slope ' + slope.toFixed(3) + '.') + '</figcaption>';
     box.innerHTML = s;
-  })();
+    var btns = box.querySelectorAll('.catchip');
+    for (var bi = 0; bi < btns.length; bi++) {
+      btns[bi].addEventListener('click', function (e) {
+        var c = e.currentTarget.getAttribute('data-cat');
+        curveCat = c === '' ? null : c;
+        renderCurve();
+      });
+    }
+  }
+  renderCurve();
 
   // --- state ------------------------------------------------------------------------
   var state = { q: '', cat: 'all', chain: 'all', wl: false, sort: 'rank', tab: 'board', sel: null };
@@ -285,6 +326,7 @@
       '<div class="dstat"><div class="k">7-day change</div><div class="v">' + fmtPct(row.chg) + '</div></div>' +
       '<div class="dstat"><div class="k">Age, no token</div><div class="v">' + fmtAge(row.age) + '</div></div>' +
       '<div class="dstat"><div class="k">Curve multiple</div><div class="v">' + row.mult.toFixed(3) + '&times;</div></div>' +
+      '<div class="dstat"><div class="k">Evidence</div><div class="v">' + (row.compN >= 10 ? 'Strong' : row.compN >= 3 ? 'Moderate' : 'Thin') + ' · ' + row.compN + '</div></div>' +
       '</div>' +
       '<h3>How the value was computed</h3>' +
       '<div class="math">' + fmtFull(row.tvl) + ' TVL &times; <b>' + row.mult.toFixed(3) + '&times;</b> curve multiple = ' + fmtFull(Math.round(base)) +

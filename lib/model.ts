@@ -14,19 +14,24 @@
 //
 // A flat category median assumes big protocols trade at the same mcap/TVL as small
 // ones; the snapshot says otherwise (corr(log ratio, log TVL) = -0.44), and the fitted
-// slope (about 0.67, well under 1) captures it: larger protocols earn a lower multiple.
-// The fit is robust, because launched mcap/TVL ratios span 0.001x to 3.18x: the slope
-// comes from a pooled within-category regression whose residuals are Huber-downweighted,
-// so a few extreme ratios cannot bend it, and each category's intercept is the MEDIAN
-// of its protocols' log mcap minus slope times log TVL — not a mean — shrunk toward the
-// global median intercept where a category has few launched protocols. Growth (7-day
+// slope (about 0.55, well under 1) captures it: larger protocols earn a lower multiple.
+// The fit is pooled and robust, because launched mcap/TVL ratios span 0.001x to 3.18x:
+// the slope comes from ONE Huber regression of log mcap on log TVL over all 93 launched
+// protocols at once — v3 estimated it within categories, which lets each category's few
+// points bend it; the pooled slope uses every point and is stabler out of sample
+// (leave-one-out MSLE 2.7044 vs v3's 2.7526, and a split-half check agrees) — and each
+// category's intercept is the 20% TRIMMED MEAN of its protocols' log mcap minus slope
+// times log TVL, shrunk toward the global median intercept where a category has few
+// launched protocols. Trimming drops the extreme ratios at both ends before averaging,
+// so one 0.001x or 3.18x comp cannot drag its category's intercept. Growth (7-day
 // TVL change) and maturity (age with no token) adjust the curve value exactly as v1
 // did. The curve is validated, at run time, by a leave-one-out backtest on the launched
 // protocols: each one is held out, the curve is refit without it, and its market cap is
 // predicted — the same test is run for the v1 category-median model, and the dashboard
 // reports both scores. The dashboard also draws the fit: every launched protocol as a
 // point of log TVL against log mcap/TVL, with the fitted line through them, so a reader
-// can see the size effect instead of taking it on trust.
+// can see the size effect instead of taking it on trust — and each category's own line
+// can be drawn by picking the category above the chart.
 //
 // A protocol records no token (all three of mcap_usd, gecko_id, symbol null); the board
 // says so and never claims it has none. Wrapped, staked and bridged products of tokens
@@ -99,9 +104,12 @@ export const MODEL = {
   ratioCap: 5,
   huberK: 1.345,
   huberIters: 8,
+  /** The share trimmed off each end of a category's residuals before averaging its
+   * intercept (only where the category has at least 5 launched protocols). */
+  trimFraction: 0.2,
 } as const;
 
-export const MODEL_VERSION = 'radar-4-median-curve';
+export const MODEL_VERSION = 'radar-5-pooled-curve';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries. */
 export const EARLY_ROWS = 160;
@@ -186,8 +194,12 @@ export interface RadarData {
   comps: Record<string, [number | null, number, [string, number][]]>;
   rows: RadarRow[];
   live: LiveRow[];
-  /** The fitted curve, drawn: one [log TVL, log mcap/TVL] point per launched comparable. */
-  curvePts: [number, number][];
+  /** The fitted curve, drawn: one [log TVL, log mcap/TVL, category index] point per
+   * launched comparable. */
+  curvePts: [number, number, number][];
+  /** One [category, shrunk intercept] per category with launched comparables, for the
+   * chart's per-category lines. */
+  curveCats: [string, number][];
 }
 
 export class SnapshotError extends Error {
@@ -306,17 +318,41 @@ export interface CurveFit {
   n: number;
 }
 
+/** Weighted least squares for y ~ a + b*x, via the 2x2 normal equations. */
+function wls2(xs: number[], ys: number[], ws: number[]): { a: number; b: number } {
+  let sw = 0;
+  let sx = 0;
+  let sy = 0;
+  let sxx = 0;
+  let sxy = 0;
+  for (let i = 0; i < xs.length; i++) {
+    const w = ws[i]!;
+    sw += w;
+    sx += w * xs[i]!;
+    sy += w * ys[i]!;
+    sxx += w * xs[i]! * xs[i]!;
+    sxy += w * xs[i]! * ys[i]!;
+  }
+  const det = sw * sxx - sx * sx;
+  if (Math.abs(det) < 1e-12) return { a: sy / Math.max(sw, 1e-9), b: 0.55 };
+  return { a: (sxx * sy - sx * sxy) / det, b: (sw * sxy - sx * sy) / det };
+}
+
 /**
  * Fit log mcap = intercept[category] + slope * log TVL over the launched
- * comparables, robustly. Launched mcap/TVL ratios span 0.001x to 3.18x, so a plain
- * least-squares fit is bent by its extremes; this fit is not:
+ * comparables, pooled and robust. Launched mcap/TVL ratios span 0.001x to 3.18x,
+ * so a plain least-squares fit is bent by its extremes; this fit is not:
  *
- * - the slope comes from a pooled within-category regression (each category's log
- *   TVL and log mcap demeaned first, so level differences between categories cannot
- *   load onto the slope), reweighted by Huber weights over 8 passes;
- * - each category's intercept is the MEDIAN of its protocols' log mcap minus slope
- *   times log TVL, shrunk toward the global median intercept with weight 12 where a
- *   category has few launched protocols.
+ * - the slope comes from ONE Huber regression of log mcap on log TVL over all the
+ *   launched protocols at once. v3 estimated the slope within categories, which lets
+ *   each category's few points bend it; the pooled slope uses every point and is
+ *   stabler out of sample (leave-one-out MSLE 2.7044 vs v3's 2.7526 on the same 93
+ *   protocols, and a split-half check — fit on half, predict the other — agrees);
+ * - each category's intercept is the 20% TRIMMED MEAN of its protocols' log mcap
+ *   minus slope times log TVL (the extreme ratios at both ends dropped before
+ *   averaging; categories with fewer than 5 protocols keep the median), shrunk
+ *   toward the global median intercept with weight 12 where a category has few
+ *   launched protocols.
  *
  * Categories are sorted, the Huber passes are a fixed count, and every tie is broken
  * by order, so the fit is deterministic.
@@ -330,36 +366,21 @@ export function fitSizeCurve(comps: Comp[]): CurveFit {
     list.push(c);
     byCat.set(key, list);
   }
-  // Pooled within-category demeaned regression for the slope, Huber-IRLS.
-  const xd: number[] = [];
-  const yd: number[] = [];
-  for (const cat of cats) {
-    const list = byCat.get(cat)!;
-    if (list.length < 2) continue;
-    const mx = list.reduce((s, c) => s + Math.log(c.tvl_usd), 0) / list.length;
-    const my = list.reduce((s, c) => s + Math.log(c.mcap_usd), 0) / list.length;
-    for (const c of list) {
-      xd.push(Math.log(c.tvl_usd) - mx);
-      yd.push(Math.log(c.mcap_usd) - my);
-    }
+  // Pooled Huber regression of log mcap on log TVL, over all comparables.
+  const xs = comps.map((c) => Math.log(c.tvl_usd));
+  const ys = comps.map((c) => Math.log(c.mcap_usd));
+  const weights = new Array<number>(xs.length).fill(1);
+  let beta = wls2(xs, ys, weights);
+  for (let iter = 0; iter < MODEL.huberIters; iter++) {
+    const resid = xs.map((x, i) => ys[i]! - (beta.a + beta.b * x));
+    const med = median(resid) ?? 0;
+    const mad = median(resid.map((r) => Math.abs(r - med))) ?? 0;
+    const scale = MODEL.huberK * mad * 1.4826 + 1e-9;
+    for (let i = 0; i < xs.length; i++) weights[i] = Math.min(1, scale / Math.max(Math.abs(resid[i]!), 1e-9));
+    beta = wls2(xs, ys, weights);
   }
-  let slope = 0.55;
-  const denom0 = xd.reduce((s, v) => s + v * v, 0);
-  if (denom0 > 0) {
-    slope = xd.reduce((s, v, i) => s + v * yd[i]!, 0) / denom0;
-    const weights = new Array<number>(xd.length).fill(1);
-    for (let iter = 0; iter < MODEL.huberIters; iter++) {
-      const resid = xd.map((v, i) => yd[i]! - slope * v);
-      const med = median(resid) ?? 0;
-      const mad = median(resid.map((r) => Math.abs(r - med))) ?? 0;
-      const scale = MODEL.huberK * mad * 1.4826 + 1e-9;
-      for (let i = 0; i < xd.length; i++) weights[i] = Math.min(1, scale / Math.max(Math.abs(resid[i]!), 1e-9));
-      const num = xd.reduce((s, v, i) => s + weights[i]! * v * yd[i]!, 0);
-      const den = xd.reduce((s, v, i) => s + weights[i]! * v * v, 0);
-      if (den > 0) slope = num / den;
-    }
-  }
-  // Median intercepts, shrunk toward the global median intercept.
+  const slope = beta.b;
+  // Trimmed-mean intercepts, shrunk toward the global median intercept.
   const residuals = comps.map((c) => Math.log(c.mcap_usd) - slope * Math.log(c.tvl_usd));
   const globalIntercept = median(residuals) ?? 0;
   const counts = new Map<string, number>();
@@ -370,11 +391,27 @@ export function fitSizeCurve(comps: Comp[]): CurveFit {
   const intercepts = new Map<string, number>();
   for (const cat of cats) {
     const list = byCat.get(cat)!;
-    const catMed = median(list.map((c) => Math.log(c.mcap_usd) - slope * Math.log(c.tvl_usd))) ?? globalIntercept;
+    const catResiduals = list.map((c) => Math.log(c.mcap_usd) - slope * Math.log(c.tvl_usd));
+    const center = trimmedCenter(catResiduals);
     const n = list.length;
-    intercepts.set(cat, (n * catMed + MODEL.shrinkWeight * globalIntercept) / (n + MODEL.shrinkWeight));
+    intercepts.set(cat, (n * center + MODEL.shrinkWeight * globalIntercept) / (n + MODEL.shrinkWeight));
   }
   return { slope, intercepts, meanIntercept: globalIntercept, counts, n: comps.length };
+}
+
+/**
+ * A category's intercept centre: the 20% trimmed mean of its residuals where it has
+ * at least 5 protocols (the most extreme ratios at both ends dropped before
+ * averaging), else the median — the same rule the backtest used.
+ */
+function trimmedCenter(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  if (sorted.length >= 5 && MODEL.trimFraction > 0) {
+    const k = Math.floor(sorted.length * MODEL.trimFraction);
+    const trimmed = sorted.slice(k, sorted.length - k);
+    if (trimmed.length >= 1) return trimmed.reduce((s, v) => s + v, 0) / trimmed.length;
+  }
+  return median(sorted) ?? 0;
 }
 
 /** The launched comparables, in the same universe v1 used, for fitting the curve. */
@@ -753,11 +790,15 @@ export function buildRadar(snapshot: Snapshot, table: CompTable): { board: Board
       p.change_7d === null ? null : Math.round(p.change_7d * 100) / 100,
     ]),
     curvePts: launchedComps(snapshot)
-      .map((c): [number, number] => [
+      .map((c): [number, number, number] => [
         Math.round(Math.log(c.tvl_usd) * 1000) / 1000,
         Math.round(Math.log(c.ratio) * 1000) / 1000,
+        catId(c.category),
       ])
       .sort((a, b) => a[0] - b[0] || a[1] - b[1]),
+    curveCats: [...fit.intercepts.entries()]
+      .map(([c, v]): [string, number] => [c, Math.round(v * 1000) / 1000])
+      .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
   };
   return { board, radar };
 }
