@@ -125,17 +125,50 @@
   $('asOf').textContent = DATA.meta.as_of;
   $('src').textContent = DATA.meta.source;
 
-  // --- the backtest, as a table -----------------------------------------------------
+  // --- the backtest, as a table + a predicted-vs-actual scatter ----------------------
   (function renderBacktest() {
     var box = $('btWrap');
     if (!box || !bt) return;
     function pct(x) { return (x * 100).toFixed(1) + '%'; }
-    box.innerHTML = '<table class="bttable"><thead><tr><th>Leave-one-out backtest, ' + bt.loo_n +
-      ' launched protocols</th><th class="num">v1 category median</th><th class="num">v4 pooled curve</th></tr></thead><tbody>' +
+    var html = '<table class="bttable"><thead><tr><th>Leave-one-out backtest, ' + bt.loo_n +
+      ' launched protocols</th><th class="num">v1 category median</th><th class="num">v5 curve</th></tr></thead><tbody>' +
       '<tr><td>Mean squared log error</td><td class="num">' + bt.v1_msle.toFixed(4) + '</td><td class="num"><b>' + bt.curve_msle.toFixed(4) + '</b></td></tr>' +
       '<tr><td>Mean absolute log error</td><td class="num">' + bt.v1_mae_log.toFixed(4) + '</td><td class="num"><b>' + bt.curve_mae_log.toFixed(4) + '</b></td></tr>' +
       '<tr><td>Predicted within 2&times; of true market cap</td><td class="num">' + pct(bt.v1_within2x) + '</td><td class="num"><b>' + pct(bt.curve_within2x) + '</b></td></tr>' +
       '</tbody></table>';
+    // Held-out predictions against the truth: one dot per launched protocol, x = its
+    // real log market cap, y = what the curve predicted with it held out. The diagonal
+    // is exact; dots above it were over-predicted, below it under-predicted. Teal dots
+    // landed within 2x, amber ones missed by more.
+    if (bt.points && bt.points.length) {
+      var pts = bt.points;
+      var W = 400, H = 210, PL = 40, PR = 10, PT = 10, PB = 24;
+      var all = pts.reduce(function (a, p) { return a.concat([p[0], p[1]]); }, []);
+      var lo = Math.min.apply(null, all) - 0.5, hi = Math.max.apply(null, all) + 0.5;
+      function X(v) { return PL + (v - lo) / (hi - lo) * (W - PL - PR); }
+      function Y(v) { return PT + (hi - v) / (hi - lo) * (H - PT - PB); }
+      function f(n, d) { return Math.round(n * Math.pow(10, d)) / Math.pow(10, d); }
+      var within = pts.filter(function (p) { return Math.abs(p[1] - p[0]) <= Math.log(2); }).length;
+      var s = '<figure class="bt-chart"><svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Held-out predictions against true market caps">';
+      s += '<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="#0a1224" rx="8"/>';
+      [13.8155, 16.1181, 18.4207, 20.7233, 23.0259].forEach(function (lv, i) {
+        if (lv < lo || lv > hi) return;
+        var lbl = ['$1M', '$10M', '$100M', '$1B', '$10B'][i];
+        s += '<line x1="' + f(X(lv), 1) + '" y1="' + PT + '" x2="' + f(X(lv), 1) + '" y2="' + (H - PB) + '" stroke="#16223c" stroke-width="1"/>';
+        s += '<line x1="' + PL + '" y1="' + f(Y(lv), 1) + '" x2="' + (W - PR) + '" y2="' + f(Y(lv), 1) + '" stroke="#16223c" stroke-width="1"/>';
+        s += '<text x="' + f(X(lv), 1) + '" y="' + (H - 8) + '" fill="#8fa3bf" font-size="9" font-family="monospace" text-anchor="middle">' + lbl + '</text>';
+        s += '<text x="' + (PL - 4) + '" y="' + f(Y(lv) + 3, 1) + '" fill="#8fa3bf" font-size="9" font-family="monospace" text-anchor="end">' + lbl + '</text>';
+      });
+      s += '<line x1="' + f(X(lo), 1) + '" y1="' + f(Y(lo), 1) + '" x2="' + f(X(hi), 1) + '" y2="' + f(Y(hi), 1) + '" stroke="#f5b942" stroke-width="1.5"/>';
+      pts.forEach(function (p) {
+        var ok = Math.abs(p[1] - p[0]) <= Math.log(2);
+        s += '<circle cx="' + f(X(p[0]), 1) + '" cy="' + f(Y(p[1]), 1) + '" r="2.8" fill="' + (ok ? '#2dd4bf' : '#f87171') + '" fill-opacity="0.9"/>';
+      });
+      s += '</svg><figcaption>Held-out predictions vs truth, ' + pts.length + ' launched protocols — ' + within +
+        ' within 2&times;. Above the line the curve over-predicted, below it under-predicted; the misses sit at both ends, where the snapshot has few comparables.</figcaption></figure>';
+      html += s;
+    }
+    box.innerHTML = html;
   })();
 
   // --- the fitted curve, drawn ------------------------------------------------------

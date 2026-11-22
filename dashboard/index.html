@@ -27,18 +27,21 @@
         <p>Each pre-token protocol is priced on a size curve fitted to the launched protocols:
         log market cap = a category intercept + a shared slope &times; log TVL. The fit is pooled
         and robust: the slope comes from one Huber regression of log market cap on log TVL over
-        all 93 launched protocols at once, and each category's intercept is the 20% trimmed mean
+        all 93 launched protocols at once, and each category's intercept is the 15% trimmed mean
         of its protocols — the extreme ratios at both ends dropped before averaging — shrunk toward
         the global median where a category has few launched protocols. A flat median would
         pay a $1B protocol the same multiple as a $10M one; the chart shows the snapshot
         says otherwise. Pick a category above the chart to draw its own line and highlight its
         protocols. That curve multiple is then adjusted for the protocol's 7-day
-        TVL growth and for how long it has run with no token. Nothing is priced from its
+        TVL growth and for how long it has run with no token — with a shallower age discount
+        than the first version assumed, so a young protocol keeps at least 70% of its curve
+        value. Nothing is priced from its
         name, and a protocol is only ever said to <em>record no token</em> — never that
         it has none.</p>
         <p>The curve is validated at run time by a leave-one-out backtest on the 93 launched
         protocols, scored against the flat category-median model on the same folds; the numbers
-        are printed below and in every detail view.</p>
+        are printed below, the held-out predictions are drawn beside them, and both are repeated
+        in every detail view.</p>
       </div>
       <figure class="curve-chart" id="curveChart" aria-label="Launched protocols: mcap over TVL against TVL, with the fitted size curve"></figure>
     </div>

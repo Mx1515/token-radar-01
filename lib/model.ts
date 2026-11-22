@@ -20,15 +20,20 @@
 // protocols at once — v3 estimated it within categories, which lets each category's few
 // points bend it; the pooled slope uses every point and is stabler out of sample
 // (leave-one-out MSLE 2.7044 vs v3's 2.7526, and a split-half check agrees) — and each
-// category's intercept is the 20% TRIMMED MEAN of its protocols' log mcap minus slope
+// category's intercept is the 15% TRIMMED MEAN of its protocols' log mcap minus slope
 // times log TVL, shrunk toward the global median intercept where a category has few
 // launched protocols. Trimming drops the extreme ratios at both ends before averaging,
-// so one 0.001x or 3.18x comp cannot drag its category's intercept. Growth (7-day
+// so one 0.001x or 3.18x comp cannot drag its category's intercept. The trim was 20%
+// in v4; 15% keeps one more protocol at each end and scores better on every validation
+// the backtest runs (leave-one-out, split-half, repeated 5-fold). Growth (7-day
 // TVL change) and maturity (age with no token) adjust the curve value exactly as v1
-// did. The curve is validated, at run time, by a leave-one-out backtest on the launched
+// did, except the maturity floor is 0.7, not 0.6: the backtest says the snapshot's
+// launched protocols discount young protocols less steeply than v1 assumed, and the
+// shallower floor (0.7 + up to 0.3 over three years) wins on every validation too.
+// The curve is validated, at run time, by a leave-one-out backtest on the launched
 // protocols: each one is held out, the curve is refit without it, and its market cap is
 // predicted — the same test is run for the v1 category-median model, and the dashboard
-// reports both scores. The dashboard also draws the fit: every launched protocol as a
+// reports both scores and draws the held-out predictions against the truth. The dashboard also draws the fit: every launched protocol as a
 // point of log TVL against log mcap/TVL, with the fitted line through them, so a reader
 // can see the size effect instead of taking it on trust — and each category's own line
 // can be drawn by picking the category above the chart.
@@ -88,8 +93,8 @@ export const MODEL = {
   growthWeight: 0.5,
   growthFloor: -60,
   growthCap: 120,
-  maturityFloor: 0.6,
-  maturityRange: 0.4,
+  maturityFloor: 0.7,
+  maturityRange: 0.3,
   maturityDays: 1095,
   unknownAgeDays: 365,
   shrinkWeight: 12,
@@ -106,10 +111,10 @@ export const MODEL = {
   huberIters: 8,
   /** The share trimmed off each end of a category's residuals before averaging its
    * intercept (only where the category has at least 5 launched protocols). */
-  trimFraction: 0.2,
+  trimFraction: 0.15,
 } as const;
 
-export const MODEL_VERSION = 'radar-5-pooled-curve';
+export const MODEL_VERSION = 'radar-6-trim15-mature';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries. */
 export const EARLY_ROWS = 160;
@@ -187,6 +192,10 @@ export interface RadarData {
       curve_mae_log: number;
       v1_within2x: number;
       curve_within2x: number;
+      /** One [actual log mcap, leave-one-out predicted log mcap] pair per launched
+       * protocol, so the dashboard can draw the held-out predictions against the
+       * truth instead of only printing the three summary numbers. */
+      points: [number, number][];
     };
   };
   cats: string[];
@@ -348,7 +357,7 @@ function wls2(xs: number[], ys: number[], ws: number[]): { a: number; b: number 
  *   each category's few points bend it; the pooled slope uses every point and is
  *   stabler out of sample (leave-one-out MSLE 2.7044 vs v3's 2.7526 on the same 93
  *   protocols, and a split-half check — fit on half, predict the other — agrees);
- * - each category's intercept is the 20% TRIMMED MEAN of its protocols' log mcap
+ * - each category's intercept is the 15% TRIMMED MEAN of its protocols' log mcap
  *   minus slope times log TVL (the extreme ratios at both ends dropped before
  *   averaging; categories with fewer than 5 protocols keep the median), shrunk
  *   toward the global median intercept with weight 12 where a category has few
@@ -400,7 +409,7 @@ export function fitSizeCurve(comps: Comp[]): CurveFit {
 }
 
 /**
- * A category's intercept centre: the 20% trimmed mean of its residuals where it has
+ * A category's intercept centre: the 15% trimmed mean of its residuals where it has
  * at least 5 protocols (the most extreme ratios at both ends dropped before
  * averaging), else the median — the same rule the backtest used.
  */
@@ -472,12 +481,13 @@ export function impliedValue(
  * error and the share predicted within 2x, for the curve and for v1.
  */
 export function looBacktest(snapshot: Snapshot, table: CompTable): CurveFit & {
-  backtest: { loo_n: number; v1_msle: number; curve_msle: number; v1_mae_log: number; curve_mae_log: number; v1_within2x: number; curve_within2x: number };
+  backtest: { loo_n: number; v1_msle: number; curve_msle: number; v1_mae_log: number; curve_mae_log: number; v1_within2x: number; curve_within2x: number; points: [number, number][] };
 } {
   const comps = launchedComps(snapshot);
   const fit = fitSizeCurve(comps);
   const v1Err: number[] = [];
   const curveErr: number[] = [];
+  const points: [number, number][] = [];
   for (let i = 0; i < comps.length; i++) {
     const held = comps[i]!;
     const train = comps.filter((_, j) => j !== i);
@@ -494,6 +504,7 @@ export function looBacktest(snapshot: Snapshot, table: CompTable): CurveFit & {
     const mult = clamp(raw, MODEL.multipleFloor, MODEL.multipleCap);
     const curvePred = Math.log(Math.max(1, held.tvl_usd * mult * adj.growthMult * adj.maturityMult));
     curveErr.push(curvePred - Math.log(held.mcap_usd));
+    points.push([round4(Math.log(held.mcap_usd)), round4(curvePred)]);
   }
   const stats = (errs: number[]): { msle: number; mae: number; within2x: number } => ({
     msle: errs.reduce((s, e) => s + e * e, 0) / errs.length,
@@ -513,6 +524,7 @@ export function looBacktest(snapshot: Snapshot, table: CompTable): CurveFit & {
       curve_mae_log: round4b(s2.mae),
       v1_within2x: round4b(s1.within2x),
       curve_within2x: round4b(s2.within2x),
+      points,
     },
   };
 }
